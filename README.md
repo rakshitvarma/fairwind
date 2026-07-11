@@ -16,7 +16,8 @@ cut inference spend without sacrificing accuracy.
 
 ```
 tasks.json -> classifier (regex, 0 tokens) -> math? -> deterministic solver (0 tokens, confident only)
-                                            -> otherwise -> batched per-category Fireworks call -> results.json
+                                            -> logic? -> self-consistent (3-call majority vote)
+                                            -> otherwise -> merged per-model Fireworks batch -> results.json
 ```
 
 1. **Local zero-token classifier** (`router/classifier.py`) routes every
@@ -28,17 +29,28 @@ tasks.json -> classifier (regex, 0 tokens) -> math? -> deterministic solver (0 t
    understanding (discounts, percentages framed as text, projections) are
    deliberately left to Fireworks — guessing wrong locally costs an
    accuracy-gate failure, which is far more expensive than a few tokens.
-3. **Batched Fireworks calls** (`router/fireworks_client.py`): every
-   unresolved task is grouped by category and answered in a *single* API
-   call per category (not per task), with `reasoning_effort: "none"` on
-   reasoning-capable models, terse category-specific system prompts, and
-   per-category `max_tokens` caps. Batching multiple tasks into one call is
-   the single biggest token lever available under this scoring scheme.
-4. Responses are parsed as a strict JSON array (`{task_id, answer}`); if a
-   batch's output doesn't parse, the batch is retried once, then degrades
-   to a best-effort answer rather than crashing — a non-zero exit or
-   malformed `results.json` scores zero, which is worse than one weak
-   answer.
+3. **Merged Fireworks batches** (`router/fireworks_client.py`): every
+   unresolved task is grouped by *model* (not by category) and answered in
+   as few calls as possible — e.g. factual, sentiment, summarisation, and
+   NER all route to the same model and are merged into a single call, with
+   per-task style instructions embedded inline. `code_debug`/`code_gen`
+   merge into a second call. This mirrors the top leaderboard entry's own
+   documented technique of merging categories into one direct batch, and
+   cuts a typical 19-task run from ~8 calls down to 2-3.
+4. **Logic puzzles get dedicated self-consistency** instead of joining the
+   merged batch: 3 independent calls, majority vote on the stated
+   conclusion. This was added after empirically reproducing a real failure
+   — the same seating-arrangement puzzle, called with identical inputs,
+   non-deterministically flipped between a correct answer and one that
+   directly contradicted its own stated constraint. Since a single wrong
+   answer here is one of only ~19 total scored tasks, the extra tokens are
+   worth it.
+5. Responses are parsed as strict JSON; a missing key for any task in a
+   merged batch, or a degenerate/repeating response, triggers one
+   corrective single-task call for just that task rather than submitting
+   an empty or wrong answer for the whole batch. A non-zero exit or
+   malformed `results.json` scores zero, which is worse than a few extra
+   tokens spent recovering.
 
 ## Model routing
 
