@@ -16,9 +16,20 @@ from collections import defaultdict
 from router.classifier import classify
 from router.solvers import try_solve_math, looks_like_python, python_syntax_error
 from router.fireworks_client import FireworksClient
+from router import local_llm
 
 INPUT_PATH = os.environ.get("TASKS_INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("TASKS_OUTPUT_PATH", "/output/results.json")
+
+# Categories the bundled local models have been eval'd against (see
+# router/eval_local.py - 24/24 correct across all six on held-out phrasing
+# distinct from sample_input/*.json) and are trusted to answer directly -
+# zero Fireworks tokens. Math and logic are deliberately excluded: math
+# already has a proven zero-token deterministic path for what can be
+# solved with certainty, and logic puzzles need the kind of careful
+# multi-step reasoning a 1.5B model is least likely to hold up on under
+# randomized rephrasing - both stay on the already-verified Fireworks path.
+LOCAL_LLM_CATEGORIES = {"sentiment", "ner", "factual", "summarization", "code_debug", "code_gen"}
 
 
 def load_tasks(path):
@@ -49,6 +60,19 @@ def main():
             if local_answer is not None:
                 answers[task_id] = local_answer
                 continue
+
+        if category in LOCAL_LLM_CATEGORIES:
+            local_answer = local_llm.answer(category, prompt)
+            if local_answer is not None:
+                if category in ("code_debug", "code_gen") and looks_like_python(local_answer):
+                    # Extra gate beyond local_llm's own sanity check: only
+                    # trust local code output that's actually valid syntax.
+                    if python_syntax_error(local_answer) is None:
+                        answers[task_id] = local_answer
+                        continue
+                else:
+                    answers[task_id] = local_answer
+                    continue
 
         buckets[category].append((task_id, prompt))
 

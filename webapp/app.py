@@ -184,10 +184,19 @@ with st.sidebar:
         "of 8 categories.\n"
         "2. **Deterministic math solver** answers bare arithmetic instantly "
         "for free — word problems fall through to Fireworks.\n"
-        "3. **Logic puzzles** get 3-call self-consistency (majority vote) — "
+        "3. **Two bundled local models** (in the submitted Docker image) "
+        "answer factual/sentiment/NER/summarisation and code_debug/code_gen "
+        "for free, sanity- and syntax-checked before being trusted.\n"
+        "4. **Logic puzzles** get 3-call self-consistency (majority vote) — "
         "cheap insurance against a demonstrated flaky-reasoning failure mode.\n"
-        "4. **Everything else** is merged by model into as few Fireworks "
+        "5. **Everything else** is merged by model into as few Fireworks "
         "calls as possible (not one call per category)."
+    )
+    st.caption(
+        "Note: this hosted demo doesn't bundle the ~2GB of local model "
+        "weights, so every query here calls Fireworks live — it's showing "
+        "the routing/model-selection logic, not the zero-token local tier "
+        "that runs inside the actual submitted container."
     )
     st.divider()
     st.markdown("**Models in play**", help="Only the models actually reachable via ALLOWED_MODELS are used.")

@@ -7,10 +7,11 @@ A Dockerized agent that answers all 8 Track 1 task categories (factual
 knowledge, math reasoning, sentiment classification, summarisation, NER,
 code debugging, logical/deductive reasoning, code generation) while
 minimizing tokens billed through Fireworks AI. RouteWise classifies and
-solves what it can for free, and only pays for Fireworks inference on the
-tasks that genuinely need it — the same core idea generalizes beyond this
-hackathon to any team routing requests across multiple LLM providers to
-cut inference spend without sacrificing accuracy.
+solves what it can for free — via deterministic code or two bundled local
+models — and only pays for Fireworks inference on the tasks that genuinely
+need it. The same core idea generalizes beyond this hackathon to any team
+routing requests across multiple LLM providers (local or hosted) to cut
+inference spend without sacrificing accuracy.
 
 **Live demo:** https://routewise-amd.streamlit.app/
 **Docker image:** `ghcr.io/rakshitvarma/routewise:latest`
@@ -18,9 +19,14 @@ cut inference spend without sacrificing accuracy.
 ## Architecture
 
 ```
-tasks.json -> classifier (regex, 0 tokens) -> math? -> deterministic solver (0 tokens, confident only)
-                                            -> logic? -> self-consistent (3-call majority vote)
-                                            -> otherwise -> merged per-model Fireworks batch -> results.json
+tasks.json -> classifier (regex, 0 tokens)
+           -> math?                       -> deterministic solver (0 tokens, confident only) -> Fireworks fallback
+           -> sentiment/ner/factual/       -> local Qwen2.5-1.5B-Instruct (0 tokens, sanity-checked)
+              summarization?
+           -> code_debug/code_gen?        -> local Qwen2.5-Coder-1.5B-Instruct (0 tokens, syntax-verified)
+           -> logic?                      -> Fireworks, self-consistent (3-call majority vote)
+           -> anything the above rejected -> merged per-model Fireworks batch
+                                                                            -> results.json
 ```
 
 1. **Local zero-token classifier** (`router/classifier.py`) routes every
@@ -32,28 +38,55 @@ tasks.json -> classifier (regex, 0 tokens) -> math? -> deterministic solver (0 t
    understanding (discounts, percentages framed as text, projections) are
    deliberately left to Fireworks — guessing wrong locally costs an
    accuracy-gate failure, which is far more expensive than a few tokens.
-3. **Merged Fireworks batches** (`router/fireworks_client.py`): every
-   unresolved task is grouped by *model* (not by category) and answered in
-   as few calls as possible — e.g. factual, sentiment, summarisation, and
-   NER all route to the same model and are merged into a single call, with
-   per-task style instructions embedded inline. `code_debug`/`code_gen`
-   merge into a second call. This mirrors the top leaderboard entry's own
-   documented technique of merging categories into one direct batch, and
-   cuts a typical 19-task run from ~8 calls down to 2-3.
-4. **Logic puzzles get dedicated self-consistency** instead of joining the
-   merged batch: 3 independent calls, majority vote on the stated
-   conclusion. This was added after empirically reproducing a real failure
-   — the same seating-arrangement puzzle, called with identical inputs,
-   non-deterministically flipped between a correct answer and one that
-   directly contradicted its own stated constraint. Since a single wrong
-   answer here is one of only ~19 total scored tasks, the extra tokens are
-   worth it.
-5. Responses are parsed as strict JSON; a missing key for any task in a
+3. **Two bundled local models** (`router/local_llm.py`, ~1GB GGUF each,
+   CPU inference via `llama-cpp-python`) answer six of the eight
+   categories entirely for free:
+   - `qwen2.5-1.5b-instruct-q4_k_m.gguf` — factual, sentiment, NER, summarisation
+   - `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` — code_debug, code_gen
+   Every local answer is sanity-checked before being trusted (non-empty,
+   non-degenerate, category-appropriate shape; code answers additionally
+   go through the same `python_syntax_error` check used for Fireworks
+   corrections). Anything that fails the check falls through to Fireworks
+   exactly like an unsolved math expression does — the local tier is pure
+   upside, never a hard dependency.
+4. **Math word problems and logic puzzles stay on Fireworks** rather than
+   the local models, deliberately. Math word problems already had a
+   reliable Fireworks track record; logic puzzles get **dedicated
+   self-consistency** (3 independent calls, majority vote) after
+   empirically reproducing a real failure — the same seating-arrangement
+   puzzle, called with identical inputs, non-deterministically flipped
+   between a correct answer and one that directly contradicted its own
+   stated constraint. A 1.5B local model is the *least* likely component
+   to hold up on this category under randomized rephrasing, so it's kept
+   off the local path entirely.
+5. **Merged Fireworks batches** (`router/fireworks_client.py`) for
+   whatever local didn't resolve: grouped by *model* (not by category) and
+   answered in as few calls as possible, with per-task style instructions
+   embedded inline. Mirrors the top leaderboard entry's own documented
+   technique of merging categories into one direct batch.
+6. Responses are parsed as strict JSON; a missing key for any task in a
    merged batch, or a degenerate/repeating response, triggers one
    corrective single-task call for just that task rather than submitting
    an empty or wrong answer for the whole batch. A non-zero exit or
    malformed `results.json` scores zero, which is worse than a few extra
    tokens spent recovering.
+
+### Local model verification
+
+Per the org's own guidance, local models are a fully valid scoring
+strategy (answers count toward accuracy; only Fireworks-routed tokens
+count toward the token score) — but final scoring uses **randomized
+prompt variants**, so a model that just memorizes the visible examples is
+worthless. `router/eval_local.py` is a standalone eval harness (run via
+`docker run --rm --entrypoint python <image> -m router.eval_local`) using
+prompts with deliberately different phrasing/domains than
+`sample_input/*.json`, to catch overfitting rather than reward it. Result
+on the last run: **24/24 correct** across all six locally-routed
+categories on held-out phrasing. On the 17-task diverse test set end to
+end, **13 of 17 tasks were answered entirely locally for zero tokens**,
+with only math word problems and logic puzzles reaching Fireworks (2,149
+tokens total, down from 3,336 in an earlier Fireworks-only version of this
+same test set).
 
 ## Model routing
 

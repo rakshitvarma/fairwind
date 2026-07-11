@@ -36,7 +36,7 @@ _SYSTEM_PROMPTS = {
     "ner": "Extract named entities (person, org, location, date) as a compact labelled list.",
     "code_debug": "Find the bug and return the corrected code only, no explanation unless asked.",
     "code_gen": "Write the correct, complete function per the spec. Code only.",
-    "logic": "Solve the constraint puzzle. State the final answer clearly, satisfying every condition.",
+    "logic": "Solve the constraint puzzle. Plain text only, no markdown/headers/tables. State the final answer in the first sentence, satisfying every condition, then briefly justify.",
     "math": "Solve step-by-step internally, then give only the final numeric/short answer.",
 }
 
@@ -47,7 +47,7 @@ _MAX_TOKENS = {
     "ner": 80,
     "code_debug": 300,
     "code_gen": 350,
-    "logic": 150,
+    "logic": 220,
     "math": 60,
 }
 
