@@ -8,6 +8,7 @@ import json
 import os
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
 
 import requests
@@ -61,6 +62,9 @@ class FireworksClient:
             raise RuntimeError("ALLOWED_MODELS is empty")
         self.total_tokens = 0
         self.total_calls = 0
+        # Shared session: connection pooling/keep-alive across the many
+        # sequential and concurrent calls a single run makes.
+        self._session = requests.Session()
 
     def _find(self, hint: str):
         for m in self.allowed_models:
@@ -124,7 +128,7 @@ class FireworksClient:
             payload["reasoning_effort"] = "none"
 
         def _post():
-            return requests.post(
+            return self._session.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                 json=payload,
@@ -200,8 +204,14 @@ class FireworksClient:
         logic_items = buckets.get("logic", [])
         if logic_items:
             model = self.pick_model("logic")
-            for task_id, prompt in logic_items:
-                results[task_id] = self._answer_logic(model, prompt)
+            # Independent per-task self-consistency runs - run multiple
+            # logic tasks concurrently too, not just the 3 calls inside each.
+            with ThreadPoolExecutor(max_workers=max(1, len(logic_items))) as pool:
+                logic_answers = list(pool.map(
+                    lambda item: self._answer_logic(model, item[1]), logic_items
+                ))
+            for (task_id, _), answer in zip(logic_items, logic_answers):
+                results[task_id] = answer
 
         model_groups: Dict[str, List[Tuple[str, str, str]]] = defaultdict(list)
         for category, items in buckets.items():
@@ -211,9 +221,7 @@ class FireworksClient:
             for task_id, prompt in items:
                 model_groups[model].append((task_id, category, prompt))
 
-        for group_key, entries in model_groups.items():
-            if not entries:
-                continue
+        def _resolve_group(group_key: str, entries: List[Tuple[str, str, str]]) -> Dict[str, str]:
             model = group_key.split("::", 1)[0]
             if len(entries) == 1:
                 task_id, category, prompt = entries[0]
@@ -221,8 +229,7 @@ class FireworksClient:
                     model, _SYSTEM_PROMPTS[category], prompt,
                     _MAX_TOKENS[category], json_mode=False,
                 )
-                results[task_id] = content.strip()
-                continue
+                return {task_id: content.strip()}
 
             ids = ", ".join(f'"{tid}"' for tid, _, _ in entries)
             lines = [
@@ -244,6 +251,7 @@ class FireworksClient:
 
             distinct_values = {v for v in parsed.values()}
             degenerate = len(distinct_values) == 1 and len(next(iter(distinct_values))) > 200
+            group_results = {}
             for task_id, category, prompt in entries:
                 answer = "" if degenerate else parsed.get(task_id, "").strip()
                 if not answer:
@@ -254,7 +262,16 @@ class FireworksClient:
                         model, _SYSTEM_PROMPTS[category], prompt,
                         _MAX_TOKENS[category], json_mode=False,
                     ).strip()
-                results[task_id] = answer
+                group_results[task_id] = answer
+            return group_results
+
+        groups = [(k, v) for k, v in model_groups.items() if v]
+        if groups:
+            # Each group is an independent HTTP call (often to a different
+            # model) - run them concurrently instead of one after another.
+            with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                for group_results in pool.map(lambda kv: _resolve_group(*kv), groups):
+                    results.update(group_results)
 
         return results
 
@@ -266,10 +283,16 @@ class FireworksClient:
         failure mode: this exact class of puzzle flipped between a correct
         answer and a self-contradictory one across otherwise-identical calls.
         """
-        responses = [
-            self._complete(model, _SYSTEM_PROMPTS["logic"], prompt, _MAX_TOKENS["logic"], json_mode=False).strip()
-            for _ in range(3)
-        ]
+        # The 3 calls are independent (same prompt, sampled separately) - run
+        # them concurrently rather than serialized, to cut 3x network
+        # round-trip latency down to ~1x. Same tokens, same accuracy.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            responses = list(pool.map(
+                lambda _: self._complete(
+                    model, _SYSTEM_PROMPTS["logic"], prompt, _MAX_TOKENS["logic"], json_mode=False
+                ).strip(),
+                range(3),
+            ))
 
         def key_of(text: str) -> str:
             m = re.search(r"\*\*([^*]+)\*\*", text)

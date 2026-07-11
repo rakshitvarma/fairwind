@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { RouteWiseLogo } from "./assets";
+import { FairwindLogo } from "./assets";
 import { Playground, type HistoryEntry } from "./components/Playground";
 import { ModelsGrid } from "./components/ModelsGrid";
 import { History } from "./components/History";
 import { Stats } from "./components/Stats";
 
-const GITHUB_URL = "https://github.com/rakshitvarma/routewise";
-const DOCKER_URL = "https://github.com/rakshitvarma/routewise/pkgs/container/routewise";
+const GITHUB_URL = "https://github.com/rakshitvarma/fairwind";
+const DOCKER_URL = "https://github.com/rakshitvarma/fairwind/pkgs/container/fairwind";
 
 function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -17,8 +17,8 @@ function App() {
       <nav className="sticky top-0 z-10 border-b border-neutral-900/80 bg-black/70 backdrop-blur-xl">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3.5">
           <div className="flex items-center gap-2.5">
-            <RouteWiseLogo size={28} />
-            <span className="text-lg font-bold tracking-tight text-white">RouteWise</span>
+            <FairwindLogo size={28} />
+            <span className="text-lg font-bold tracking-tight text-white">Fairwind</span>
           </div>
           <div className="flex items-center gap-5 text-sm text-neutral-400">
             <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="transition hover:text-white">

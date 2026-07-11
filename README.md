@@ -1,4 +1,4 @@
-# RouteWise
+# Fairwind
 
 **A hybrid token-efficient routing agent** — built for AMD Developer
 Hackathon Act II, Track 1 (Hybrid Token-Efficient Routing Agent).
@@ -6,15 +6,15 @@ Hackathon Act II, Track 1 (Hybrid Token-Efficient Routing Agent).
 A Dockerized agent that answers all 8 Track 1 task categories (factual
 knowledge, math reasoning, sentiment classification, summarisation, NER,
 code debugging, logical/deductive reasoning, code generation) while
-minimizing tokens billed through Fireworks AI. RouteWise classifies and
+minimizing tokens billed through Fireworks AI. Fairwind classifies and
 solves what it can for free — via deterministic code or two bundled local
 models — and only pays for Fireworks inference on the tasks that genuinely
 need it. The same core idea generalizes beyond this hackathon to any team
 routing requests across multiple LLM providers (local or hosted) to cut
 inference spend without sacrificing accuracy.
 
-**Live demo:** https://routewise-frontend-841323378171.us-central1.run.app
-**Docker image:** `ghcr.io/rakshitvarma/routewise:latest`
+**Live demo:** https://fairwind-frontend-841323378171.us-central1.run.app
+**Docker image:** `ghcr.io/rakshitvarma/fairwind:latest`
 
 ## Architecture
 
@@ -111,7 +111,7 @@ for anyone who wants to enable it deliberately.
 
 ## Live demo
 
-**https://routewise-frontend-841323378171.us-central1.run.app**
+**https://fairwind-frontend-841323378171.us-central1.run.app**
 
 A React/Vite/Tailwind frontend calling a FastAPI backend
 (`backend/main.py`), both deployed on Google Cloud Run. Pick an example
@@ -138,12 +138,12 @@ npm run dev
 
 ```bash
 cp .env.example .env   # fill in FIREWORKS_API_KEY, FIREWORKS_BASE_URL, ALLOWED_MODELS
-docker build -t routewise .
+docker build -t fairwind .
 docker run --rm \
   -v "$(pwd)/sample_input:/input" \
   -v "$(pwd)/output:/output" \
   --env-file .env \
-  routewise
+  fairwind
 cat output/results.json
 ```
 

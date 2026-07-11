@@ -1,4 +1,4 @@
-"""RouteWise API — the same routing logic as main.py (the Track 1 submission
+"""Fairwind API — the same routing logic as main.py (the Track 1 submission
 entrypoint), exposed as a proper HTTP API for a decoupled frontend.
 
 Reuses router/ unchanged: classifier, solvers, local_llm, fireworks_client.
@@ -20,7 +20,7 @@ from router import local_llm
 
 LOCAL_LLM_CATEGORIES = {"sentiment", "ner", "factual", "summarization", "code_debug", "code_gen"}
 
-app = FastAPI(title="RouteWise API")
+app = FastAPI(title="Fairwind API")
 
 _allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(

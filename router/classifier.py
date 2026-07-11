@@ -74,6 +74,13 @@ def classify(prompt: str) -> str:
         return "sentiment"
     if _LOGIC_WORDS.search(text):
         return "logic"
-    if _MATH_WORDS.search(text) or _MATH_EXPR_RE.search(text):
+    # Weak math keywords (calculate, projection, total cost, ...) only count
+    # when the prompt also has a digit in it - genuine math word problems
+    # always do (amounts, percentages, prices). Without this guard, a
+    # non-numeric prompt that merely contains the word "calculations" (e.g.
+    # an open-ended reasoning/proof request) gets misrouted to "math", which
+    # only gets a 60-token Fireworks budget - nowhere near enough for an
+    # actual explanation, so the answer gets hard-truncated mid-sentence.
+    if _MATH_EXPR_RE.search(text) or (_MATH_WORDS.search(text) and re.search(r"\d", text)):
         return "math"
     return "factual"
