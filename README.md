@@ -13,7 +13,7 @@ need it. The same core idea generalizes beyond this hackathon to any team
 routing requests across multiple LLM providers (local or hosted) to cut
 inference spend without sacrificing accuracy.
 
-**Live demo:** https://routewise-amd.streamlit.app/
+**Live demo:** https://routewise-frontend-841323378171.us-central1.run.app
 **Docker image:** `ghcr.io/rakshitvarma/routewise:latest`
 
 ## Architecture
@@ -111,17 +111,28 @@ for anyone who wants to enable it deliberately.
 
 ## Live demo
 
-A small Streamlit app (`webapp/app.py`) lets you try the router live —
-pick an example task per category (or write your own) and see the
-classification, routing decision (local vs. which Fireworks model), token
-cost, and answer, plus a running session history. It imports the exact
-same `router/` package used by the submitted Docker image, so it reflects
-real behavior rather than a reimplementation.
+**https://routewise-frontend-841323378171.us-central1.run.app**
 
-Run it locally with `streamlit run webapp/app.py` after copying
-`.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` with real
-Fireworks credentials (or export the same three env vars used by the
-Docker image).
+A React/Vite/Tailwind frontend calling a FastAPI backend
+(`backend/main.py`), both deployed on Google Cloud Run. Pick an example
+task per category (or write your own) and see the classification, routing
+decision (local vs. which Fireworks model), token cost, and answer, plus a
+running session history. The backend wraps the exact same `router/`
+package used by the submitted Docker image, so it reflects real behavior
+rather than a reimplementation.
+
+Run it locally:
+
+```bash
+# backend
+cd backend && pip install -r requirements.txt
+uvicorn main:app --reload --port 8080
+
+# frontend
+cd frontend && npm install
+echo "VITE_API_URL=http://localhost:8080" > .env.local
+npm run dev
+```
 
 ## Running locally
 
