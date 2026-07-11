@@ -16,8 +16,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from router.classifier import classify
 from router.solvers import try_solve_math
 from router.fireworks_client import FireworksClient
+from assets import ROUTEWISE_LOGO_SVG, MODEL_BADGES
 
-st.set_page_config(page_title="RouteWise", page_icon="🧭", layout="centered")
+_FAVICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.png")
+st.set_page_config(page_title="RouteWise", page_icon=_FAVICON, layout="centered")
 
 # Bridge Streamlit secrets into the environment variables FireworksClient
 # reads, without touching the router package used by the submitted image.
@@ -40,21 +42,13 @@ CATEGORY_META = {
     "logic": ("🧩", "#5CFCE0"),
 }
 
-MODEL_META = [
-    ("minimax", "MiniMax M3", "M", "#7C5CFC", "#4E7CFC"),
-    ("kimi", "Kimi K2.7", "K", "#20E3B2", "#0D8ABC"),
-    ("gemma", "Gemma", "G", "#FBC02D", "#FF7043"),
-    ("local", "Local (0 tokens)", "⚡", "#43E97B", "#38F9D7"),
-]
-
-
 def model_badge(model_id: str) -> str:
     low = (model_id or "").lower()
-    for hint, name, glyph, c1, c2 in MODEL_META:
+    for hint, name, icon_svg, bg in MODEL_BADGES:
         if hint in low:
             return (
                 f'<div class="rw-model">'
-                f'<div class="rw-avatar" style="background:linear-gradient(135deg,{c1},{c2})">{glyph}</div>'
+                f'<div class="rw-avatar" style="background:{bg}">{icon_svg}</div>'
                 f'<span>{name}</span></div>'
             )
     short = model_id.split("/")[-1] if model_id else "n/a"
@@ -121,10 +115,12 @@ st.markdown(
     .rw-model { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: #D5D8E3; }
     .rw-avatar {
         width: 26px; height: 26px; border-radius: 50%; display: flex;
-        align-items: center; justify-content: center; font-size: 0.8rem;
-        font-weight: 700; color: #0E1117; flex-shrink: 0;
-        box-shadow: 0 0 0 2px #0E111744;
+        align-items: center; justify-content: center; flex-shrink: 0;
+        box-shadow: 0 0 0 2px #0E111744; overflow: hidden;
     }
+    .rw-avatar svg { display: block; }
+
+    .rw-logo { display: flex; align-items: center; gap: 14px; }
 
     .rw-card {
         background: linear-gradient(160deg, #191D29, #12141C);
@@ -149,10 +145,11 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="rw-hero"><h1>🧭 RouteWise</h1>'
-    '<p>Hybrid token-efficient routing agent — built for AMD Developer Hackathon '
-    'Act II, Track 1. Classifies and solves for free where it can, and only pays '
-    'for Fireworks inference on tasks that genuinely need it.</p></div>',
+    f'<div class="rw-hero">'
+    f'<div class="rw-logo">{ROUTEWISE_LOGO_SVG}<h1>RouteWise</h1></div>'
+    f'<p>Hybrid token-efficient routing agent — built for AMD Developer Hackathon '
+    f'Act II, Track 1. Classifies and solves for free where it can, and only pays '
+    f'for Fireworks inference on tasks that genuinely need it.</p></div>',
     unsafe_allow_html=True,
 )
 
@@ -194,10 +191,10 @@ with st.sidebar:
     )
     st.divider()
     st.markdown("**Models in play**", help="Only the models actually reachable via ALLOWED_MODELS are used.")
-    for hint, name, glyph, c1, c2 in MODEL_META:
+    for hint, name, icon_svg, bg in MODEL_BADGES:
         st.markdown(
             f'<div class="rw-model" style="margin-bottom:6px">'
-            f'<div class="rw-avatar" style="background:linear-gradient(135deg,{c1},{c2})">{glyph}</div>'
+            f'<div class="rw-avatar" style="background:{bg}">{icon_svg}</div>'
             f'<span>{name}</span></div>',
             unsafe_allow_html=True,
         )

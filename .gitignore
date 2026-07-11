@@ -5,3 +5,4 @@ __pycache__/
 .claude/
 .git-askpass.sh
 .streamlit/secrets.toml
+/models/
