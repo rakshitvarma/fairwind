@@ -268,6 +268,7 @@ if run and prompt.strip():
         math_answer = try_solve_math(prompt)
         if math_answer is not None:
             answer, model_used = math_answer, "local (deterministic)"
+        # Word problems deliberately stay on Fireworks - see main.py for why.
 
     if answer is None and category in LOCAL_LLM_CATEGORIES:
         local_answer = local_llm.answer(category, prompt)

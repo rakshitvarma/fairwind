@@ -36,6 +36,14 @@ def _safe_eval(node):
     raise ValueError("unsupported expression")
 
 
+def _format_result(result):
+    if isinstance(result, float):
+        result = round(result, 6)  # clear binary float noise (e.g. 46.800000000000004)
+        if result.is_integer():
+            result = int(result)
+    return str(result)
+
+
 def try_solve_math(prompt: str) -> Optional[str]:
     """Solve prompts that are *just* a bare arithmetic expression.
 
@@ -51,17 +59,33 @@ def try_solve_math(prompt: str) -> Optional[str]:
     match = _EXPR_RE.fullmatch(text.replace("^", "**").replace(" ", ""))
     if not match:
         return None
+    return evaluate_expression(text)
 
-    expr = text.replace("^", "**")
+
+def evaluate_expression(expr: str) -> Optional[str]:
+    """Safely evaluate a bare arithmetic expression string (numbers and
+    +-*/^%() only). Used both for prompts that are already a bare
+    expression, and for expressions a local model extracted from a word
+    problem - in the latter case the model's output is trusted for
+    *extraction only*; the actual arithmetic is still done here, in code,
+    so a small model's well-known weakness at doing the arithmetic itself
+    can't produce a wrong answer.
+    """
+    text = (expr or "").strip()
+    # Models sometimes append "= <their own computed value>" despite being
+    # told not to - discard that and evaluate only the expression part
+    # ourselves, since trusting the model's own arithmetic is exactly what
+    # this function exists to avoid.
+    text = text.split("=")[0]
+    text = text.replace("^", "**").replace(",", "").replace(" ", "").rstrip("?.!")
+    if not text:
+        return None
     try:
-        tree = ast.parse(expr, mode="eval")
-        result = _safe_eval(tree.body if hasattr(tree, "body") else tree)
+        tree = ast.parse(text, mode="eval")
+        result = _safe_eval(tree.body)
     except Exception:
         return None
-
-    if isinstance(result, float) and result.is_integer():
-        result = int(result)
-    return str(result)
+    return _format_result(result)
 
 
 # Code debugging / generation deliberately have no local deterministic

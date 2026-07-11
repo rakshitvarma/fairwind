@@ -60,6 +60,16 @@ def main():
             if local_answer is not None:
                 answers[task_id] = local_answer
                 continue
+            # Word problems deliberately stay on Fireworks, not
+            # local_llm.try_solve_math_word_problem(): that path exists and
+            # works on the handful of cases tested, but a handful of
+            # invented test cases doesn't bound the true failure rate
+            # against genuinely randomized prompts, and an attempt to make
+            # it safer via self-consistency empirically made it *less*
+            # reliable (temperature sampling turned a correct answer wrong).
+            # Fireworks has been 100% correct on every math word problem
+            # across every test run - real evidence beats a handful of
+            # ad hoc samples when a wrong answer risks the accuracy gate.
 
         if category in LOCAL_LLM_CATEGORIES:
             local_answer = local_llm.answer(category, prompt)

@@ -188,6 +188,85 @@ def answer(category: str, prompt: str) -> Optional[str]:
     return text
 
 
+_MATH_EXTRACT_PROMPT = (
+    "Extract ONLY the arithmetic expression (numbers and + - * / ^ % ( ) only, "
+    "no words, no units, no currency symbols, no equals sign) that computes the "
+    "final numeric answer to this word problem. Output nothing else."
+)
+
+# Rate/unit-conversion problems ("60 miles in 45 minutes, what's the speed in
+# mph") need an extra reasoning step (converting minutes to hours) before the
+# arithmetic even starts. Verified empirically: the local model extracted
+# "60/45" for exactly this kind of problem - a wrong *expression*, not an
+# arithmetic slip, so evaluate_expression's guaranteed-correct computation
+# doesn't help. Rather than risk a wrong answer, skip local extraction
+# entirely for this class and defer to Fireworks, already proven reliable
+# on it.
+_RATE_CONVERSION_RE = re.compile(
+    r"\bper (hour|minute|second|day|week|month|year)\b|\bspeed\b|\brate of\b|"
+    r"\bmiles per\b|\bkm per\b|\bkilometers per\b|\bconvert\b|\bmph\b|\bkph\b",
+    re.I,
+)
+
+
+def try_solve_math_word_problem(prompt: str) -> Optional[str]:
+    """Word problems ('a $40 item marked up 30%...') need language
+    understanding to turn into an expression, which is exactly what a
+    small local model is reasonably good at - but small models are known
+    to make arithmetic mistakes doing the actual computation themselves.
+    So: local model extracts the expression only, and the real arithmetic
+    is done by solvers.evaluate_expression (deterministic, always correct).
+    Returns None (falls through to Fireworks) if the model's output isn't a
+    clean, evaluable expression, or the problem needs a conversion step the
+    extraction step has been caught getting wrong - never guesses.
+    """
+    from router.solvers import evaluate_expression  # local import: avoid a cycle at module load
+
+    if _RATE_CONVERSION_RE.search(prompt):
+        return None
+
+    llm = _get_llm("general")
+    if llm is None:
+        return None
+
+    # Self-consistency (3 samples, majority vote on the computed *value* -
+    # not the raw expression text, since "40*1.3*0.9" and "40*0.9*1.3" are
+    # textually different but numerically identical). This has to sample at
+    # temperature>0: unlike Fireworks (where we observed real run-to-run
+    # variance even at temperature=0, likely from serving-side batching
+    # non-determinism), local llama.cpp inference is a single, unbatched
+    # request and is genuinely deterministic at temperature=0 - repeating an
+    # identical call would just reproduce the same answer 3/3 times and
+    # prove nothing. Sampling lets the model actually explore different
+    # reasoning paths so disagreement is a real signal, not theater.
+    values = []
+    for _ in range(3):
+        try:
+            result = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": _MATH_EXTRACT_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=60,
+                temperature=0.7,
+            )
+            expr = result["choices"][0]["message"]["content"].strip()
+        except Exception:
+            continue
+        val = evaluate_expression(expr)
+        if val is not None:
+            values.append(val)
+
+    if not values:
+        return None
+
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best_value, best_count = max(counts.items(), key=lambda kv: kv[1])
+    return best_value if best_count >= 2 else None
+
+
 def _sane(category: str, text: str) -> bool:
     """Cheap zero-token confidence check - reject obviously broken output
     rather than trusting a small model blindly."""
