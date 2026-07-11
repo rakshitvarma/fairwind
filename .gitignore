@@ -4,3 +4,4 @@ __pycache__/
 /output/
 .claude/
 .git-askpass.sh
+.streamlit/secrets.toml
