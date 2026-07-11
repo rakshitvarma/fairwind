@@ -113,13 +113,25 @@ def _get_llm(model_key: str):
         return _llm_cache[model_key]
     if model_key in _load_failed:
         return None
+
+    # Check llama_cpp is importable *before* possibly downloading ~1GB of
+    # weights - environments without it installed (e.g. this hosted demo,
+    # after llama-cpp-python was dropped from its requirements when
+    # compiling it from source stalled indefinitely on Streamlit Cloud's
+    # build infra) would otherwise download the full file just to fail
+    # on import afterward.
+    try:
+        from llama_cpp import Llama
+    except Exception:
+        _load_failed.add(model_key)
+        return None
+
     path = _MODEL_PATHS[model_key]
     if not (os.path.exists(path) and os.path.getsize(path) == _MODEL_DOWNLOAD[model_key][1]):
         if not _ensure_model_file(model_key):
             _load_failed.add(model_key)
             return None
     try:
-        from llama_cpp import Llama
         llm = Llama(
             model_path=path,
             n_ctx=1024,
