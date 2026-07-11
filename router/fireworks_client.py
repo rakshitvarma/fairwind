@@ -38,7 +38,8 @@ _SYSTEM_PROMPTS = {
     "code_debug": "Find the bug and return the corrected code only, no explanation unless asked.",
     "code_gen": "Write the correct, complete function per the spec. Code only.",
     "logic": "Solve the constraint puzzle. On the first line, state the final answer wrapped in double asterisks like **answer**, satisfying every condition. Then briefly justify in plain text - no headers, no tables, no bullet lists.",
-    "math": "Solve step-by-step internally, then give only the final numeric/short answer.",
+    "math": "Solve step by step. Keep each step to one short line (no long explanations), "
+            "then give the final numeric answer clearly labeled on its own line at the end.",
 }
 
 _MAX_TOKENS = {
@@ -49,7 +50,12 @@ _MAX_TOKENS = {
     "code_debug": 300,
     "code_gen": 350,
     "logic": 220,
-    "math": 60,
+    # Multi-step word problems (percentages, multi-quarter totals, unit
+    # conversions) legitimately need a few lines of working plus the final
+    # answer - 60 was tuned for "just the final number" but real prompts
+    # show brief steps regardless of instruction, and got hard-truncated
+    # mid-line. 150 comfortably fits a handful of one-line steps.
+    "math": 150,
 }
 
 
