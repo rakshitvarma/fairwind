@@ -50,40 +50,55 @@ def main():
     buckets = defaultdict(list)  # category -> [(task_id, prompt)]
 
     for task in tasks:
-        task_id = task["task_id"]
-        prompt = task["prompt"]
-        category = classify(prompt)
+        # A single malformed task (missing/wrong-typed field, unexpected
+        # content) must not lose every other task's already-computed
+        # answer - isolate each task's processing so one bad entry
+        # degrades to a missing answer for *that task only*, not a crash
+        # that discards the whole batch via the outer handler.
+        task_id = task.get("task_id") if isinstance(task, dict) else None
+        if task_id is None:
+            print(f"[warn] skipping task with no task_id: {task!r}", file=sys.stderr)
+            continue
+        try:
+            prompt = task["prompt"]
+            category = classify(prompt)
 
-        if category == "math":
-            local_answer = try_solve_math(prompt)
-            if local_answer is not None:
-                answers[task_id] = local_answer
-                print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) solved deterministically", file=sys.stderr)
-                continue
-            # Word problems deliberately stay on Fireworks, not
-            # local_llm.try_solve_math_word_problem(): that path exists and
-            # works on the handful of cases tested, but a handful of
-            # invented test cases doesn't bound the true failure rate
-            # against genuinely randomized prompts, and an attempt to make
-            # it safer via self-consistency empirically made it *less*
-            # reliable (temperature sampling turned a correct answer wrong).
-            # Fireworks has been 100% correct on every math word problem
-            # across every test run - real evidence beats a handful of
-            # ad hoc samples when a wrong answer risks the accuracy gate.
+            if category == "math":
+                local_answer = try_solve_math(prompt)
+                if local_answer is not None:
+                    answers[task_id] = local_answer
+                    print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) solved deterministically", file=sys.stderr)
+                    continue
+                # Word problems deliberately stay on Fireworks, not
+                # local_llm.try_solve_math_word_problem(): that path exists
+                # and works on the handful of cases tested, but a handful
+                # of invented test cases doesn't bound the true failure
+                # rate against genuinely randomized prompts, and an
+                # attempt to make it safer via self-consistency
+                # empirically made it *less* reliable (temperature
+                # sampling turned a correct answer wrong). Fireworks has
+                # been 100% correct on every math word problem across
+                # every test run - real evidence beats a handful of ad
+                # hoc samples when a wrong answer risks the accuracy gate.
 
-        if category in LOCAL_LLM_CATEGORIES:
-            local_started = time.time()
-            local_answer = local_llm.answer_confident(category, prompt)
-            local_elapsed = time.time() - local_started
-            if local_answer is not None:
-                if category in ("code_debug", "code_gen"):
-                    local_answer = strip_code_fence(local_answer)
-                answers[task_id] = local_answer
-                print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local (confident) in {local_elapsed:.1f}s", file=sys.stderr)
-                continue
-            print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local not confident, in {local_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
+            if category in LOCAL_LLM_CATEGORIES:
+                local_started = time.time()
+                local_answer = local_llm.answer_confident(category, prompt)
+                local_elapsed = time.time() - local_started
+                if local_answer is not None:
+                    if category in ("code_debug", "code_gen"):
+                        local_answer = strip_code_fence(local_answer)
+                    answers[task_id] = local_answer
+                    print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local (confident) in {local_elapsed:.1f}s", file=sys.stderr)
+                    continue
+                print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local not confident, in {local_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
 
-        buckets[category].append((task_id, prompt))
+            buckets[category].append((task_id, prompt))
+        except Exception as exc:
+            print(f"[warn] failed to process task {task_id}: {exc}", file=sys.stderr)
+            # Leave it out of both answers and buckets - it gets an empty
+            # string in the final results, exactly like an unresolved
+            # Fireworks task, rather than aborting everything else.
 
     if any(buckets.values()):
         print(f"[timing] t={time.time()-started:.1f}s starting Fireworks phase, buckets={ {k: len(v) for k, v in buckets.items()} }", file=sys.stderr)
@@ -117,8 +132,8 @@ def main():
             file=sys.stderr,
         )
 
-    results = [{"task_id": tid, "answer": answers.get(tid, "")} for tid in
-               [t["task_id"] for t in tasks]]
+    task_ids = [t.get("task_id") for t in tasks if isinstance(t, dict) and t.get("task_id") is not None]
+    results = [{"task_id": tid, "answer": answers.get(tid, "")} for tid in task_ids]
     write_results(OUTPUT_PATH, results)
     print(f"[done] {len(results)} tasks in {time.time() - started:.1f}s", file=sys.stderr)
 
@@ -132,7 +147,10 @@ if __name__ == "__main__":
         # hard-fail the whole submission if input parsing blew up.
         try:
             tasks = load_tasks(INPUT_PATH)
-            write_results(OUTPUT_PATH, [{"task_id": t["task_id"], "answer": ""} for t in tasks])
+            write_results(OUTPUT_PATH, [
+                {"task_id": t["task_id"], "answer": ""} for t in tasks
+                if isinstance(t, dict) and t.get("task_id") is not None
+            ])
         except Exception:
             write_results(OUTPUT_PATH, [])
         sys.exit(1)
