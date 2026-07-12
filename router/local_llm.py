@@ -22,6 +22,19 @@ import subprocess
 import sys
 from typing import Optional
 
+# A SIGALRM-based per-call watchdog was tried here and reverted: verified
+# empirically that llama.cpp's create_chat_completion is a blocking native
+# call that doesn't yield back to the Python interpreter during generation,
+# so a Python-level signal handler can't interrupt it mid-call (confirmed:
+# a 2s alarm did not stop an 83s call). main.py's time-budget guard is the
+# real mitigation - it stops *new* local attempts once the run is close to
+# the 10-minute cap, bounding how much a single slow call can compound
+# across a batch, without the false confidence of a timeout that doesn't
+# actually fire. A genuine hard per-call kill switch would need a
+# persistent subprocess worker (model loaded once, called via
+# subprocess.communicate(timeout=N), restarted on timeout) - a real
+# architecture change, not a one-line fix.
+
 _MODELS_DIR = os.environ.get(
     "LOCAL_MODELS_DIR",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models"),

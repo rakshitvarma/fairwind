@@ -7,6 +7,7 @@ token lever available, matching the top leaderboard entry's approach.
 import json
 import os
 import re
+import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
@@ -53,13 +54,54 @@ def _prompt_key(category: str, prompt: str) -> str:
     return category
 
 
+# Conservative leading/trailing politeness stripper. A competitor (TERA)
+# uses aggressive prompt compression to cut input tokens; that pays off for
+# chatty real-user prompts but the Track 1 eval prompts are terse benchmark
+# strings with little filler, and aggressive stripping risks corrupting the
+# quoted text / passages that sentiment/NER/summarization are graded on. So
+# this only trims obvious conversational wrappers at the very start/end, and
+# only when the prompt carries no quoted content or embedded passage to
+# preserve - a near-zero-risk trim that helps in the rare case a task does
+# carry filler and does nothing (the common case) when it doesn't.
+_LEAD_POLITE_RE = re.compile(
+    r"^(?:hi|hello|hey)[,!.]?\s+|"
+    r"^(?:please|kindly)\s+|"
+    r"^(?:can|could|would|will)\s+you\s+(?:please\s+|kindly\s+)?|"
+    r"^(?:i\s+(?:would\s+like|'?d\s+like|want)\s+you\s+to)\s+|"
+    r"^(?:kindly\s+)?help\s+me\s+(?:to\s+)?",
+    re.I,
+)
+_TRAIL_POLITE_RE = re.compile(
+    r"\s*(?:thanks?|thank\s+you)(?:\s+(?:so\s+much|very\s+much|a\s+lot|in\s+advance))?[.!]*\s*$",
+    re.I,
+)
+
+
+def _compress_prompt(category: str, prompt: str) -> str:
+    """Trim leading/trailing politeness, but never for summarization (the
+    passage must stay verbatim) and never when the prompt embeds quoted
+    text (sentiment/NER inputs, exact-reply instructions) that could be
+    graded literally."""
+    if category == "summarization":
+        return prompt
+    if any(q in prompt for q in ('"', "'", "`", "“", "‘")):
+        return prompt
+    trimmed = _LEAD_POLITE_RE.sub("", prompt, count=1)
+    trimmed = _TRAIL_POLITE_RE.sub("", trimmed, count=1)
+    trimmed = trimmed.strip()
+    # Only accept the trim if it actually removed something and left a
+    # substantive prompt behind - never return an empty/near-empty string.
+    return trimmed if len(trimmed) >= 8 and trimmed != prompt.strip() else prompt
+
+
 _SYSTEM_PROMPTS = {
     "factual": "Answer each question in 1-2 short sentences. No preamble, no filler.",
     "factual_detailed": (
-        "Answer thoroughly with clear step-by-step reasoning or derivation as "
-        "requested. Use LaTeX ($...$ or $$...$$) for math notation and fenced "
-        "code blocks for code. No filler preamble, but do not artificially "
-        "truncate the explanation."
+        "Give the derivation/step-by-step reasoning as requested, but as "
+        "concisely as correctness allows - each step in one short line, no "
+        "restating the question, no filler commentary between steps. Use "
+        "LaTeX ($...$ or $$...$$) for math notation and fenced code blocks "
+        "for code. Do not truncate before reaching the final result."
     ),
     "sentiment": "Classify sentiment (positive/negative/neutral) and give a one-clause justification.",
     "summarization": "Summarise each passage to the exact length/format constraint given. No preamble.",
@@ -73,7 +115,14 @@ _SYSTEM_PROMPTS = {
 
 _MAX_TOKENS = {
     "factual": 130,
-    "factual_detailed": 450,
+    # 300 was tried and reverted: MiniMax's actual derivation style (LaTeX,
+    # per-step headers) didn't compress as much as the tightened prompt
+    # asked for, so it hit truncation and triggered the retry-at-2x-budget
+    # safety net - which costs a full second generation, making the total
+    # *worse* (1004 tokens) than the original 450-budget version (612).
+    # 400 leaves headroom to avoid that expensive retry while still cutting
+    # some slack versus 450.
+    "factual_detailed": 400,
     "sentiment": 40,
     "summarization": 100,
     "ner": 80,
@@ -143,8 +192,18 @@ class FireworksClient:
             lines.append(f'"{task_id}": {prompt}')
         return "\n".join(lines)
 
+    def _fallback_model(self, failed_model: str):
+        """A different allowed (non-Gemma, to avoid the deploy cost) model to
+        retry on when `failed_model` errors - a single unservable/rate-limited
+        model must degrade to "answered by the other model" rather than "every
+        task in that bucket gets an empty answer"."""
+        for m in self.allowed_models:
+            if m != failed_model and "gemma" not in m.lower():
+                return m
+        return None
+
     def _complete(self, model: str, system: str, user: str, max_tokens: int,
-                   json_mode: bool = True) -> str:
+                   json_mode: bool = True, _is_fallback: bool = False) -> str:
         payload = {
             "model": model,
             "messages": [
@@ -177,21 +236,48 @@ class FireworksClient:
                 timeout=25,
             )
 
-        resp = _post()
-        if resp.status_code == 400:
-            # Some models may reject response_format/reasoning_effort params
-            # outright - retry once with only the bare essentials before
-            # giving up (cheaper than losing the whole category to a 400).
-            payload.pop("response_format", None)
-            payload.pop("reasoning_effort", None)
+        try:
             resp = _post()
-        resp.raise_for_status()
+            if resp.status_code == 400:
+                # Some models may reject response_format/reasoning_effort params
+                # outright - retry once with only the bare essentials before
+                # giving up (cheaper than losing the whole category to a 400).
+                payload.pop("response_format", None)
+                payload.pop("reasoning_effort", None)
+                resp = _post()
+            resp.raise_for_status()
+        except Exception:
+            # This specific model may be down/rate-limited while others are
+            # fine - one shot on a different allowed model before propagating.
+            fallback = None if _is_fallback else self._fallback_model(model)
+            if fallback is None:
+                raise
+            print(f"[warn] {model} failed, retrying via {fallback}", file=sys.stderr)
+            return self._complete(fallback, system, user, max_tokens,
+                                  json_mode=json_mode, _is_fallback=True)
         data = resp.json()
 
         usage = data.get("usage", {})
         self.total_tokens += usage.get("total_tokens", 0)
         self.total_calls += 1
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+
+        # Reasoning models can leak their chain-of-thought as <think>...</think>
+        # (or leave an unclosed <think> when truncated) - never let that reach
+        # the grader as part of the answer text.
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.S)
+        content = re.sub(r"<think>.*\Z", "", content, flags=re.S).strip()
+
+        # A hard-truncated single answer (finish_reason=length) risks the
+        # accuracy gate far more than one retry's tokens - retry once with
+        # double the budget, but only on the plain-text path (batched JSON
+        # budgets are already sized as a sum over their items).
+        finish = (data.get("choices") or [{}])[0].get("finish_reason")
+        if finish == "length" and not json_mode and not _is_fallback:
+            print(f"[warn] {model} answer truncated at {max_tokens} tokens, retrying with x2", file=sys.stderr)
+            return self._complete(model, system, user, max_tokens * 2,
+                                  json_mode=False, _is_fallback=True)
+        return content
 
     def answer_batch(self, category: str, items: List[Tuple[str, str]]) -> Dict[str, str]:
         """items: list of (task_id, prompt). Returns {task_id: answer}."""
@@ -262,7 +348,9 @@ class FireworksClient:
                 continue
             model = self.pick_model(category)
             for task_id, prompt in items:
-                model_groups[model].append((task_id, category, prompt))
+                # Trim conversational filler once here so every downstream
+                # path (single/batch/corrective) sends the leaner prompt.
+                model_groups[model].append((task_id, category, _compress_prompt(category, prompt)))
 
         def _resolve_group(group_key: str, entries: List[Tuple[str, str, str]]) -> Dict[str, str]:
             model = group_key.split("::", 1)[0]

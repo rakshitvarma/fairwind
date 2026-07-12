@@ -27,14 +27,34 @@ from router import local_llm
 INPUT_PATH = os.environ.get("TASKS_INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("TASKS_OUTPUT_PATH", "/output/results.json")
 
-# Both were validated against real examples before deciding a default:
 # spaCy NER scored 9/15 (60%) fully-matched entities - worse than the
 # existing calibrated LLM+Fireworks pipeline (97%), so it stays off.
-# PAL math scored 3/3 (100%) on percentage/rate/fraction word problems -
-# on by default, still gated behind its own self-consistency agreement
-# check (>=2/3 samples) same as everything else in this module.
+#
+# PAL math scored well on a handful of examples (3/3), but every clean
+# (uncontended) test run this session showed each PAL attempt costing
+# 20-45s - 3x local generations plus sandboxed execution, per task. A
+# hidden evaluation set with more math word problems than we tested could
+# compound that past the 10-minute cap. TIMEOUT scores zero; Fireworks has
+# been 100% correct and fast (2-5s) on every math word problem tested -
+# defaulting PAL off trades a modest, unproven token saving for a real,
+# proven-safe path. Left available to opt into (e.g. for local demoing)
+# via the env var.
 _ENABLE_SPACY_NER = os.environ.get("ENABLE_SPACY_NER", "false").lower() == "true"
-_ENABLE_MATH_PAL = os.environ.get("ENABLE_MATH_PAL", "true").lower() == "true"
+_ENABLE_MATH_PAL = os.environ.get("ENABLE_MATH_PAL", "false").lower() == "true"
+
+# Deterministic solvers (try_solve_math, try_solve_logic_row, spaCy) are
+# near-instant - no guard needed. The local-model paths are not: PAL math
+# has been observed taking 20-45s+ per task when self-consistency doesn't
+# immediately agree, and the confidence-gate's 3-sample local generation
+# is a similar cost. Our own test sets stay well under the 10-minute cap,
+# but a hidden evaluation set with more math/local-eligible tasks than we
+# tested against could compound that per-task cost past it. Once the
+# elapsed time crosses this budget, skip straight to the (fast, batched,
+# parallel) Fireworks bucket for every remaining task rather than risk a
+# TIMEOUT - a token cost is always recoverable, a TIMEOUT scores zero.
+# 420s (7 min) leaves a 180s margin for the Fireworks phase + write step,
+# tightened from 480s given real TIMEOUT reports on a submitted run.
+_TIME_BUDGET_SECONDS = float(os.environ.get("TIME_BUDGET_SECONDS", "420"))
 
 # Categories the bundled local models are allowed to attempt - each answer
 # still has to clear the self-consistency confidence gate in
@@ -60,6 +80,13 @@ def main():
 
     answers = {}
     buckets = defaultdict(list)  # category -> [(task_id, prompt)]
+    # In-run dedup: identical prompts (whatever their task_ids) get computed
+    # once and copied - the evaluation set can repeat prompts, and paying a
+    # second local generation or Fireworks call for a byte-identical prompt
+    # buys nothing. This is per-run working state only (nothing persisted or
+    # baked into the image, which is what the no-caching rule prohibits).
+    seen_prompts = {}   # prompt -> task_id whose answer to copy
+    dup_of = {}         # task_id -> earlier task_id with the identical prompt
 
     for task in tasks:
         # A single malformed task (missing/wrong-typed field, unexpected
@@ -73,6 +100,17 @@ def main():
             continue
         try:
             prompt = task["prompt"]
+
+            earlier = seen_prompts.get(prompt)
+            if earlier is not None:
+                # Identical prompt already being handled - reuse its answer
+                # (resolved after the Fireworks phase, since the earlier task
+                # may itself still be waiting in a bucket at this point).
+                dup_of[task_id] = earlier
+                print(f"[timing] t={time.time()-started:.1f}s {task_id} deduplicated (same prompt as {earlier})", file=sys.stderr)
+                continue
+            seen_prompts[prompt] = task_id
+
             category = classify(prompt)
 
             if category == "math":
@@ -94,7 +132,7 @@ def main():
                 # answer risks the accuracy gate. ENABLE_MATH_PAL opts into
                 # local_llm.try_solve_math_word_problem_pal() instead (a
                 # program-aided, sandboxed alternative) once validated.
-                if _ENABLE_MATH_PAL:
+                if _ENABLE_MATH_PAL and time.time() - started < _TIME_BUDGET_SECONDS:
                     pal_started = time.time()
                     pal_answer = local_llm.try_solve_math_word_problem_pal(prompt)
                     pal_elapsed = time.time() - pal_started
@@ -103,6 +141,8 @@ def main():
                         print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) solved via local PAL in {pal_elapsed:.1f}s", file=sys.stderr)
                         continue
                     print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) PAL not confident, in {pal_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
+                elif _ENABLE_MATH_PAL:
+                    print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) skipping PAL (time budget), falling to Fireworks", file=sys.stderr)
 
             if category == "logic":
                 logic_answer = try_solve_logic_row(prompt)
@@ -121,7 +161,7 @@ def main():
                     print(f"[timing] t={time.time()-started:.1f}s {task_id} (ner) solved via spaCy", file=sys.stderr)
                     continue
 
-            if category in LOCAL_LLM_CATEGORIES:
+            if category in LOCAL_LLM_CATEGORIES and time.time() - started < _TIME_BUDGET_SECONDS:
                 local_started = time.time()
                 local_answer = local_llm.answer_confident(category, prompt)
                 local_elapsed = time.time() - local_started
@@ -132,6 +172,8 @@ def main():
                     print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local (confident) in {local_elapsed:.1f}s", file=sys.stderr)
                     continue
                 print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local not confident, in {local_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
+            elif category in LOCAL_LLM_CATEGORIES:
+                print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) skipping local attempt (time budget), falling to Fireworks", file=sys.stderr)
 
             buckets[category].append((task_id, prompt))
         except Exception as exc:
@@ -181,6 +223,9 @@ def main():
             )
         except Exception as exc:
             print(f"[warn] Fireworks phase failed entirely: {exc}", file=sys.stderr)
+
+    for dup_id, earlier_id in dup_of.items():
+        answers[dup_id] = answers.get(earlier_id, "")
 
     task_ids = [t.get("task_id") for t in tasks if isinstance(t, dict) and t.get("task_id") is not None]
     results = [{"task_id": tid, "answer": answers.get(tid, "")} for tid in task_ids]
