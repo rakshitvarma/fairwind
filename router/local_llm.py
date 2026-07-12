@@ -298,6 +298,22 @@ def _calibrated_probability(points: list, signal: float) -> float:
     return points[-1][1]
 
 
+def _curve_can_ever_trust(curve: dict) -> bool:
+    """True if some point on this category's fitted calibration curve
+    reaches the target reliability - if not, no signal this category can
+    produce will ever pass the gate, so there's no point spending 3 local
+    generations (real wall-clock cost, both in the live demo and inside
+    the Track 1 submission's runtime budget) just to reject every single
+    time. `force_escalate` already covers the "not enough/too weak data"
+    case; this covers "we have a real curve, but it tops out too low"
+    (e.g. sentiment's fitted P(correct) maxes around 0.65, well under the
+    0.85 bar, even at perfect self-consistency agreement)."""
+    if curve.get("force_escalate"):
+        return False
+    points = curve.get("points") or []
+    return any(p_correct >= _TARGET_RELIABILITY for _, p_correct in points)
+
+
 def confidence_signal(category: str, primary: str, samples: list) -> Optional[float]:
     """Raw self-consistency agreement signal in [0, 1] - higher means the
     independent samples agreed more. Category-appropriate since there's no
@@ -378,6 +394,14 @@ def answer_confident(category: str, prompt: str) -> Optional[str]:
     calibrated confidence escalates to Fireworks (returns None) rather
     than risking a locally-generated wrong answer.
     """
+    calibration = _load_calibration()
+    curve = calibration.get(category)
+    if curve is not None and not _curve_can_ever_trust(curve):
+        # No signal this category can produce would ever clear the gate -
+        # skip the 3 local generations entirely rather than pay their real
+        # wall-clock cost for a guaranteed rejection.
+        return None
+
     sampled = sample_answers(category, prompt)
     if sampled is None:
         return None
@@ -387,11 +411,7 @@ def answer_confident(category: str, prompt: str) -> Optional[str]:
     if signal is None:
         return None
 
-    calibration = _load_calibration()
-    curve = calibration.get(category)
     if curve is not None:
-        if curve.get("force_escalate"):
-            return None
         p_correct = _calibrated_probability(curve.get("points", []), signal)
         return primary if p_correct >= _TARGET_RELIABILITY else None
 
