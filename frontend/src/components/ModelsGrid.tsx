@@ -1,13 +1,14 @@
 import { MODEL_INFO } from "../assets";
 
 const CATEGORY_LABELS: Record<string, string[]> = {
-  "qwen3": ["factual", "sentiment", "ner", "summarization", "code_debug", "code_gen"],
+  "qwen3": ["factual", "sentiment", "ner", "summarization"],
+  "qwen2.5-coder": ["code_debug", "code_gen"],
   "minimax": ["factual", "sentiment", "ner", "summarization", "math", "logic"],
   "kimi": ["code_debug", "code_gen"],
   "gemma": ["sentiment (bonus)"],
 };
 
-const LOCAL_HINTS = new Set(["qwen3"]);
+const LOCAL_HINTS = new Set(["qwen3", "qwen2.5-coder"]);
 
 export function ModelsGrid() {
   return (

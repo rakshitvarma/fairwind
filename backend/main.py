@@ -34,10 +34,15 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _preload():
-    # Warm up local models once at container startup, not on the first
-    # request - matches the intent of the webapp's st.cache_resource
-    # preload, just via FastAPI's own startup hook.
-    local_llm.preload()
+    # Warm up the general model once at container startup, not on the
+    # first request - matches the intent of the webapp's st.cache_resource
+    # preload, just via FastAPI's own startup hook. Deliberately skips the
+    # coder model here: eagerly loading both (~3.6GB combined) pushed
+    # Cloud Run's startup health check past its timeout - the coder model
+    # still lazy-loads fine on the first actual code_gen/code_debug demo
+    # request, same one-time-cold-start tradeoff already accepted
+    # elsewhere (the Track 1 image never preloads anything at all).
+    local_llm._get_llm("general")
 
 
 class RouteRequest(BaseModel):
@@ -46,7 +51,7 @@ class RouteRequest(BaseModel):
 
 class RouteResponse(BaseModel):
     category: str
-    source: str  # "local (deterministic)" | "qwen3" | a Fireworks model id | "error" | "n/a"
+    source: str  # "local (deterministic)" | "qwen3" | "qwen2.5-coder" | a Fireworks model id | "error" | "n/a"
     tokens: int
     elapsed: float
     answer: str
@@ -74,7 +79,8 @@ def models():
     return {
         "fireworks_models": fireworks_models,
         "local_models": [
-            {"name": "Qwen3-4B-Instruct-2507", "categories": ["factual", "sentiment", "ner", "summarization", "code_debug", "code_gen"]},
+            {"name": "Qwen3-4B-Instruct-2507", "categories": ["factual", "sentiment", "ner", "summarization"]},
+            {"name": "Qwen2.5-Coder-1.5B-Instruct", "categories": ["code_debug", "code_gen"]},
         ],
         "has_fireworks_creds": has_creds,
     }
@@ -99,7 +105,10 @@ def route(req: RouteRequest):
         if local_answer is not None:
             if category in ("code_debug", "code_gen"):
                 local_answer = strip_code_fence(local_answer)
-            answer, source = local_answer, "qwen3"
+                source = "qwen2.5-coder"
+            else:
+                source = "qwen3"
+            answer = local_answer
 
     has_creds = all(os.environ.get(k) for k in ("FIREWORKS_API_KEY", "FIREWORKS_BASE_URL", "ALLOWED_MODELS"))
     if answer is None and has_creds:

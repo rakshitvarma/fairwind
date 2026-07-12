@@ -73,6 +73,7 @@ export const MODEL_INFO: ModelInfo[] = [
   { hint: "kimi", name: "Kimi (Moonshot AI)", icon: <MiniIcon path={MOONSHOT_PATH} fill="#111111" />, bg: "#FFFFFF" },
   { hint: "gemma", name: "Gemma (Google)", icon: <MiniIcon path={GEMINI_PATH} fill="#8E75B2" />, bg: "#FFFFFF" },
   { hint: "qwen3", name: "Qwen3-4B-Instruct-2507", icon: <MiniIcon path={QWEN_PATH} fill="#6950EF" />, bg: "#FFFFFF" },
+  { hint: "qwen2.5-coder", name: "Qwen2.5-Coder-1.5B-Instruct", icon: <MiniIcon path={QWEN_PATH} fill="#22C55E" />, bg: "#FFFFFF" },
 ];
 
 const BOLT_PATH = "M13 2 3 14h7l-1 8 10-12h-7z";
