@@ -2,8 +2,11 @@
 
 Reads /input/tasks.json, routes each task through:
   1. local zero-token classifier
-  2. local zero-token deterministic solvers (math only, conservative)
-  3. batched Fireworks calls per category for everything else
+  2. local zero-token deterministic solver (math only, conservative)
+  3. local zero-token model answer, gated behind a self-consistency
+     confidence check (see router/local_llm.answer_confident) - only
+     trusted when independent samples agree, otherwise escalated
+  4. batched Fireworks calls per category for everything else
 Writes /output/results.json. Always exits 0 with valid JSON, even in
 degraded form, since malformed output or a crash scores zero.
 """
@@ -14,21 +17,17 @@ import time
 from collections import defaultdict
 
 from router.classifier import classify
-from router.solvers import try_solve_math, looks_like_python, python_syntax_error
+from router.solvers import try_solve_math, looks_like_python, python_syntax_error, strip_code_fence
 from router.fireworks_client import FireworksClient
 from router import local_llm
 
 INPUT_PATH = os.environ.get("TASKS_INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("TASKS_OUTPUT_PATH", "/output/results.json")
 
-# Categories the bundled local models have been eval'd against (see
-# router/eval_local.py - 24/24 correct across all six on held-out phrasing
-# distinct from sample_input/*.json) and are trusted to answer directly -
-# zero Fireworks tokens. Math and logic are deliberately excluded: math
-# already has a proven zero-token deterministic path for what can be
-# solved with certainty, and logic puzzles need the kind of careful
-# multi-step reasoning a 1.5B model is least likely to hold up on under
-# randomized rephrasing - both stay on the already-verified Fireworks path.
+# Categories the bundled local models are allowed to attempt - each answer
+# still has to clear the self-consistency confidence gate in
+# local_llm.answer_confident before being trusted; anything it rejects
+# falls through to Fireworks like any other unresolved task.
 LOCAL_LLM_CATEGORIES = {"sentiment", "ner", "factual", "summarization", "code_debug", "code_gen"}
 
 
@@ -74,21 +73,15 @@ def main():
 
         if category in LOCAL_LLM_CATEGORIES:
             local_started = time.time()
-            local_answer = local_llm.answer(category, prompt)
+            local_answer = local_llm.answer_confident(category, prompt)
             local_elapsed = time.time() - local_started
             if local_answer is not None:
-                if category in ("code_debug", "code_gen") and looks_like_python(local_answer):
-                    # Extra gate beyond local_llm's own sanity check: only
-                    # trust local code output that's actually valid syntax.
-                    if python_syntax_error(local_answer) is None:
-                        answers[task_id] = local_answer
-                        print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local in {local_elapsed:.1f}s", file=sys.stderr)
-                        continue
-                else:
-                    answers[task_id] = local_answer
-                    print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local in {local_elapsed:.1f}s", file=sys.stderr)
-                    continue
-            print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local rejected/failed in {local_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
+                if category in ("code_debug", "code_gen"):
+                    local_answer = strip_code_fence(local_answer)
+                answers[task_id] = local_answer
+                print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local (confident) in {local_elapsed:.1f}s", file=sys.stderr)
+                continue
+            print(f"[timing] t={time.time()-started:.1f}s {task_id} ({category}) local not confident, in {local_elapsed:.1f}s, falling to Fireworks", file=sys.stderr)
 
         buckets[category].append((task_id, prompt))
 
@@ -116,6 +109,7 @@ def main():
                         answer = client.fix_code(category, prompt_by_task[task_id], answer, err)
                     except Exception as exc:
                         print(f"[warn] fix_code failed for {task_id}: {exc}", file=sys.stderr)
+                answer = strip_code_fence(answer)
             answers[task_id] = answer
         print(
             f"[stats] fireworks_calls={client.total_calls} "

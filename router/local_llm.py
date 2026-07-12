@@ -172,16 +172,7 @@ def available(category: str = "general") -> bool:
     return _get_llm(model_key) is not None
 
 
-def answer(category: str, prompt: str) -> Optional[str]:
-    """Return a locally-generated answer, or None if the model isn't
-    available or the output fails a basic sanity check."""
-    model_key = _CATEGORY_MODEL.get(category)
-    if model_key is None:
-        return None
-    llm = _get_llm(model_key)
-    if llm is None:
-        return None
-
+def _generate(llm, category: str, prompt: str, temperature: float) -> Optional[str]:
     try:
         result = llm.create_chat_completion(
             messages=[
@@ -189,15 +180,122 @@ def answer(category: str, prompt: str) -> Optional[str]:
                 {"role": "user", "content": prompt},
             ],
             max_tokens=_MAX_TOKENS[category],
-            temperature=0,
+            temperature=temperature,
         )
-        text = result["choices"][0]["message"]["content"].strip()
+        return result["choices"][0]["message"]["content"].strip()
     except Exception:
         return None
 
-    if not _sane(category, text):
+
+def answer(category: str, prompt: str) -> Optional[str]:
+    """Return a locally-generated answer, or None if the model isn't
+    available or the output fails a basic sanity check. Single sample,
+    no confidence gate - kept for callers that just want the cheapest
+    possible check (e.g. the webapp demo)."""
+    model_key = _CATEGORY_MODEL.get(category)
+    if model_key is None:
+        return None
+    llm = _get_llm(model_key)
+    if llm is None:
+        return None
+
+    text = _generate(llm, category, prompt, temperature=0)
+    if text is None or not _sane(category, text):
         return None
     return text
+
+
+_SENTIMENT_LABEL_RE = re.compile(r"\b(positive|negative|neutral|mixed)\b", re.I)
+
+
+def _label_of(category: str, text: str) -> Optional[str]:
+    if category == "sentiment":
+        m = _SENTIMENT_LABEL_RE.search(text)
+        return m.group(1).lower() if m else None
+    return None
+
+
+def _token_set(text: str) -> set:
+    return {w.lower().strip(".,;:!?()[]\"'") for w in text.split() if len(w) > 2}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+# Agreement thresholds tuned conservatively: escalating a task that could
+# have been answered correctly for free costs a few tokens, but trusting a
+# locally-generated answer that later turns out wrong costs the accuracy
+# gate - the more expensive mistake, by far.
+_OVERLAP_THRESHOLD = 0.40
+
+
+def answer_confident(category: str, prompt: str) -> Optional[str]:
+    """Self-consistency gated version of answer(): the deterministic
+    (temperature=0) sample must also agree with 2 additional stochastic
+    samples before being trusted, using a category-appropriate agreement
+    signal. Disagreement escalates to Fireworks (returns None) rather than
+    risking a locally-generated wrong answer - same principle as the
+    3-call majority vote already used for logic puzzles and math word
+    problems, generalized to every locally-eligible category.
+    """
+    model_key = _CATEGORY_MODEL.get(category)
+    if model_key is None:
+        return None
+    llm = _get_llm(model_key)
+    if llm is None:
+        return None
+
+    primary = _generate(llm, category, prompt, temperature=0)
+    if primary is None or not _sane(category, primary):
+        return None
+
+    samples = [primary]
+    for _ in range(2):
+        extra = _generate(llm, category, prompt, temperature=0.7)
+        if extra is not None and _sane(category, extra):
+            samples.append(extra)
+
+    if len(samples) < 2:
+        # Couldn't even get a second opinion - not enough signal to trust.
+        return None
+
+    if category == "sentiment":
+        labels = [_label_of(category, s) for s in samples]
+        labels = [l for l in labels if l is not None]
+        if len(labels) < 2:
+            return None
+        counts = {}
+        for l in labels:
+            counts[l] = counts.get(l, 0) + 1
+        top_label, top_count = max(counts.items(), key=lambda kv: kv[1])
+        return primary if top_count >= 2 else None
+
+    if category in ("code_debug", "code_gen"):
+        # Syntax validity across independent samples is the agreement
+        # signal for code: if the model can only produce valid syntax
+        # some of the time for this exact prompt, it's shaky on it.
+        from router.solvers import looks_like_python, python_syntax_error
+        valid_count = sum(
+            1 for s in samples
+            if looks_like_python(s) and python_syntax_error(s) is None
+        )
+        if valid_count < 2:
+            return None
+        return primary if (looks_like_python(primary) and python_syntax_error(primary) is None) else None
+
+    # factual / ner / summarization: no clean discrete label to vote on,
+    # so use token-overlap similarity between the primary sample and each
+    # additional sample as a proxy for "the model keeps saying the same
+    # thing" rather than confabulating differently each time.
+    primary_tokens = _token_set(primary)
+    overlaps = [_jaccard(primary_tokens, _token_set(s)) for s in samples[1:]]
+    avg_overlap = sum(overlaps) / len(overlaps)
+    return primary if avg_overlap >= _OVERLAP_THRESHOLD else None
 
 
 _MATH_EXTRACT_PROMPT = (

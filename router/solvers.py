@@ -107,11 +107,19 @@ def looks_like_python(text: str) -> bool:
     return bool(_PY_HINT_RE.search(text)) and not _OTHER_LANG_RE.search(text)
 
 
+def strip_code_fence(code: str) -> str:
+    """Remove a leading/trailing markdown code fence. The model is asked
+    for "code only," but often wraps it in ```python ... ``` anyway - if
+    the returned answer text still has that fence, anything that tries to
+    exec() it literally hits a SyntaxError on the fence markers themselves,
+    even though the code inside is fine."""
+    return re.sub(r"^```(python)?\s*|\s*```$", "", code.strip(), flags=re.I)
+
+
 def python_syntax_error(code: str) -> Optional[str]:
     """Return None if `code` parses as valid Python, else the error message."""
-    stripped = re.sub(r"^```(python)?\s*|\s*```$", "", code.strip(), flags=re.I)
     try:
-        ast.parse(stripped)
+        ast.parse(strip_code_fence(code))
         return None
     except SyntaxError as exc:
         return str(exc)
