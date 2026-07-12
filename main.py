@@ -101,36 +101,46 @@ def main():
             # Fireworks task, rather than aborting everything else.
 
     if any(buckets.values()):
-        print(f"[timing] t={time.time()-started:.1f}s starting Fireworks phase, buckets={ {k: len(v) for k, v in buckets.items()} }", file=sys.stderr)
-        client = FireworksClient()
+        # Everything in this block is best-effort: if FireworksClient()
+        # itself fails (e.g. a required env var missing) or anything else
+        # here throws unexpectedly, that must only cost the bucketed tasks
+        # an empty answer - not propagate to the outer handler and wipe
+        # out every already-computed local/deterministic answer too
+        # (verified this exact failure mode: a missing FIREWORKS_API_KEY
+        # discarded an already-solved bare-arithmetic answer).
         try:
-            merged_answers = client.answer_all(buckets)
-        except Exception:
+            print(f"[timing] t={time.time()-started:.1f}s starting Fireworks phase, buckets={ {k: len(v) for k, v in buckets.items()} }", file=sys.stderr)
+            client = FireworksClient()
             try:
-                merged_answers = client.answer_all(buckets)  # one retry
-            except Exception as exc:
-                print(f"[warn] answer_all failed twice: {exc}", file=sys.stderr)
-                merged_answers = {}
-        print(f"[timing] t={time.time()-started:.1f}s Fireworks phase (answer_all) done", file=sys.stderr)
+                merged_answers = client.answer_all(buckets)
+            except Exception:
+                try:
+                    merged_answers = client.answer_all(buckets)  # one retry
+                except Exception as exc:
+                    print(f"[warn] answer_all failed twice: {exc}", file=sys.stderr)
+                    merged_answers = {}
+            print(f"[timing] t={time.time()-started:.1f}s Fireworks phase (answer_all) done", file=sys.stderr)
 
-        category_by_task = {tid: cat for cat, items in buckets.items() for tid, _ in items}
-        prompt_by_task = {tid: p for items in buckets.values() for tid, p in items}
-        for task_id, category in category_by_task.items():
-            answer = merged_answers.get(task_id, "")
-            if category in ("code_debug", "code_gen") and looks_like_python(answer):
-                err = python_syntax_error(answer)
-                if err:
-                    try:
-                        answer = client.fix_code(category, prompt_by_task[task_id], answer, err)
-                    except Exception as exc:
-                        print(f"[warn] fix_code failed for {task_id}: {exc}", file=sys.stderr)
-                answer = strip_code_fence(answer)
-            answers[task_id] = answer
-        print(
-            f"[stats] fireworks_calls={client.total_calls} "
-            f"total_tokens={client.total_tokens}",
-            file=sys.stderr,
-        )
+            category_by_task = {tid: cat for cat, items in buckets.items() for tid, _ in items}
+            prompt_by_task = {tid: p for items in buckets.values() for tid, p in items}
+            for task_id, category in category_by_task.items():
+                answer = merged_answers.get(task_id, "")
+                if category in ("code_debug", "code_gen") and looks_like_python(answer):
+                    err = python_syntax_error(answer)
+                    if err:
+                        try:
+                            answer = client.fix_code(category, prompt_by_task[task_id], answer, err)
+                        except Exception as exc:
+                            print(f"[warn] fix_code failed for {task_id}: {exc}", file=sys.stderr)
+                    answer = strip_code_fence(answer)
+                answers[task_id] = answer
+            print(
+                f"[stats] fireworks_calls={client.total_calls} "
+                f"total_tokens={client.total_tokens}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"[warn] Fireworks phase failed entirely: {exc}", file=sys.stderr)
 
     task_ids = [t.get("task_id") for t in tasks if isinstance(t, dict) and t.get("task_id") is not None]
     results = [{"task_id": tid, "answer": answers.get(tid, "")} for tid in task_ids]
